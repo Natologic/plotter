@@ -1,10 +1,13 @@
 use crate::fit_handler::FitHandler;
+use crate::fit_handler::current_fit_time_fine;
 
 use crate::LATEST_HR;
+use crate::HR_SAMPLES;
 
+use std::thread::current;
 use std::thread::{JoinHandle, sleep};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ant::channel::{RxError, RxHandler, TxError, TxHandler};
@@ -66,7 +69,7 @@ impl<T: Default + Clone> RxHandler<T> for RxReceiver<T> {
     }
 }
 
-pub fn create_ant_thread(term: Arc<AtomicBool>) -> JoinHandle<()> {
+pub fn create_ant_thread(term: Arc<AtomicBool>, ctx: egui::Context, hr_points: Arc<Mutex<Vec<[f64; 2]>>>, start_fit_time: f64) -> JoinHandle<()> {
     std::thread::spawn(move || {
         // Heartrate variable
         let mut fit_handler = FitHandler::create_file().expect("Unable to create FIT file");
@@ -86,10 +89,14 @@ pub fn create_ant_thread(term: Arc<AtomicBool>) -> JoinHandle<()> {
         router.send(&snk).expect("failed to set network key");
         let chan = router .add_channel(TxSender { sender: router_tx }).expect("Failed to add ANT channel");
         let config = DisplayConfig { device_number: 0, device_number_extension: 0.into(), channel: chan, period: Period::FourHz, ant_plus_key_index: 0};
+        
+        let hr_points_cb = Arc::clone(&hr_points);
+
         let mut hr = Display::new( config, TxSender { sender: channel_tx }, RxReceiver { receiver: channel_rx});
         hr.set_rx_datapage_callback(Some(|x| {
             if let Ok(ref page) = x {
                 LATEST_HR.store(page.common().computed_heart_rate, Ordering::Relaxed);
+                HR_SAMPLES.fetch_add(1, Ordering::Relaxed);
             }
             println!("{:#?}", x);
         }));
@@ -97,13 +104,28 @@ pub fn create_ant_thread(term: Arc<AtomicBool>) -> JoinHandle<()> {
         hr.set_rx_message_callback(Some(|x| println!("{:#?}", x)));
         hr.open();
 
+        // last sample index
+        let mut last_hr_sample = 0;
+
         while !term.load(Ordering::Relaxed) {
             router.process().unwrap();
             hr.process().unwrap();
 
-            let hr_value = LATEST_HR.load(Ordering::Relaxed);
-            fit_handler.update_file(hr_value).expect("Unable to update FIT file");
-            sleep(Duration::from_millis(100));
+            let current_hr_sample = HR_SAMPLES.load(Ordering::Relaxed);
+            if current_hr_sample != last_hr_sample {
+                let timestamp = current_fit_time_fine();
+                let heart_rate = LATEST_HR.load(Ordering::Relaxed);
+                let relative_x = (timestamp - start_fit_time).max(0.0);
+                if let Ok(mut points) = hr_points_cb.lock() {
+                    points.push([relative_x, heart_rate as f64]);
+                }
+
+                last_hr_sample = current_hr_sample;
+                let hr_value = LATEST_HR.load(Ordering::Relaxed);
+                fit_handler.update_file(timestamp, hr_value).expect("Unable to update FIT file");
+                ctx.request_repaint();
+            }
+            sleep(Duration::from_millis(50));
         }
         println!("Exiting...");
         fit_handler.finish_file().expect("Unable to finish FIT file");

@@ -2,36 +2,68 @@ mod fit_handler;
 mod ant_handler;
 
 use std::io::Error;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU8, AtomicUsize, AtomicBool, Ordering};
+use std::thread::current;
 
-use egui_plot::Line;
+use egui_plot::{Line, PlotBounds};
 use egui_plot::Plot;
 use egui_plot::PlotPoints;
 
 use eframe::egui;
 
+use crate::fit_handler::current_fit_time_fine;
+
 pub static LATEST_HR: AtomicU8 = AtomicU8::new(0);
+pub static HR_SAMPLES: AtomicUsize = AtomicUsize::new(0);
 
 pub struct HeartratePlot {
-    hr_points: Vec<[f64; 2]>,
+    x_range: f64,
+    lock: bool,
+    hr_points: Arc<Mutex<Vec<[f64; 2]>>>,
     term: Arc<AtomicBool>,
 }
 
 impl HeartratePlot {
-    pub fn new(_cc: &eframe::CreationContext<'_>, term: Arc<AtomicBool>) -> Self {
-        let hr_points = Vec::new();
-
-        Self { hr_points, term }
+    pub fn new(
+        _cc: &eframe::CreationContext<'_>, hr_points: Arc<Mutex<Vec<[f64; 2]>>>, term: Arc<AtomicBool>) -> Self {
+        Self {
+            x_range: 20.0,
+            lock: true,
+            hr_points,
+            term,
+        }
     }
 
     pub fn update_plot(&mut self, ui: &mut egui::Ui) {
-        let hr = LATEST_HR.load(Ordering::Relaxed) as f64;
-        let x = self.hr_points.len() as f64;
-        self.hr_points.push([x, hr]);
-        let plot_points = PlotPoints::from(self.hr_points.clone());
-        let line = Line::new("HR", plot_points); 
-        Plot::new("HR").view_aspect(2.0).show(ui, |plot_ui| plot_ui.line(line));
+        // get the time
+        let points = self.hr_points.lock().unwrap();
+        let x_current = points.last().map(|p| p[0]).unwrap_or(0.0);
+
+        // set the lower bound to 0 if we are less than the range
+        let x_upper_bound = x_current;
+        let x_lower_bound = if x_current > self.x_range {
+            x_upper_bound - self.x_range
+        }
+        else {
+            0.0
+        };
+
+        let plot_points = PlotPoints::from_iter(points.iter().copied());
+        let line = Line::new("HR", plot_points);
+
+        Plot::new("HR")
+            .view_aspect(2.0)
+            .show(ui, |plot_ui| {
+                if self.lock == true {
+                    plot_ui.set_plot_bounds(PlotBounds::from_min_max(
+                        [x_lower_bound, 40.0],
+                        [x_upper_bound, 200.0]
+                    ));
+                }
+                plot_ui.line(line);
+            });
+        
     }
 }
 
@@ -42,7 +74,6 @@ impl eframe::App for HeartratePlot {
             return;
         }
         self.update_plot(ui);
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
     }
 }
 
@@ -52,20 +83,25 @@ fn main() -> Result<(), Error> {
     let app_term = Arc::clone(&term);
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&term))?;
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&term))?;
-    // create the ANT thread
-    let ant_handle = ant_handler::create_ant_thread(Arc::clone(&term));
     // initalize the plot
+    let start_fit_time = current_fit_time_fine();
+    let hr_points = Arc::new(Mutex::new(Vec::new()));
     let native_options = eframe::NativeOptions::default();
     eframe::run_native(
         "Heartrate",
         native_options,
-        Box::new(|cc| Ok(Box::new(HeartratePlot::new(cc, app_term)))),
+        Box::new(|cc| {
+            let ant_handle = ant_handler::create_ant_thread(
+                Arc::clone(&term),
+                cc.egui_ctx.clone(),
+                Arc::clone(&hr_points),
+                start_fit_time,
+            );
+            Ok(Box::new(HeartratePlot::new(cc, hr_points, app_term)))    
+        }),
     ).map_err(std::io::Error::other)?;
 
     term.store(true, Ordering::Relaxed);
-    if let Err(e) = ant_handle.join() {
-        eprintln!("ANT thread error: {:?}", e);
-    }
 
     Ok(())
 }

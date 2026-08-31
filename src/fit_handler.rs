@@ -7,9 +7,9 @@ use rustyfit::{Encoder, profile::{mesgdef, typedef}, proto::Message};
 use std::{fs::File, io::{BufWriter}};
 use rustyfit::profile::typedef::DateTime;
 
-fn current_fit_time() -> u32 {
+pub fn current_fit_time_fine() -> f64 {
     // Subtract the epoch from the current time. FIT epoch starts 1989-12-31T00:00:00Z which is 631065600
-    (SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() - (631065600 as u64)) as u32
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() - 631065600.0
 }
 
 pub struct FitHandler {
@@ -30,15 +30,15 @@ impl FitHandler {
         stream.write_message(&mut {
             let mut file_id = mesgdef::FileId::new();
             file_id.r#type = typedef::File::ACTIVITY;
-            file_id.time_created = DateTime(current_fit_time());
+            file_id.time_created = DateTime(current_fit_time_fine() as u32);
             Message::from(file_id)
         }).map_err(std::io::Error::other)?;
 
         Ok(Self { last_ts: 0, stream })
     }
 
-    pub fn update_file (&mut self, heart_rate: u8) -> Result<(), Error> {
-        let current_ts: u32 = current_fit_time();
+    pub fn update_file (&mut self, timestamp: f64, heart_rate: u8) -> Result<(), Error> {
+        let current_ts: u32 = timestamp as u32;
 
         // only save if we are greater than last time
         if current_ts > self.last_ts {
