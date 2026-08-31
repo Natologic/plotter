@@ -1,10 +1,6 @@
 use crate::fit_handler::FitHandler;
 use crate::fit_handler::current_fit_time_fine;
 
-use crate::LATEST_HR;
-use crate::HR_SAMPLES;
-
-use std::thread::current;
 use std::thread::{JoinHandle, sleep};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -19,6 +15,7 @@ use rusb::{Device, DeviceList};
 use thingbuf::mpsc::errors::{TryRecvError, TrySendError};
 use thingbuf::mpsc::{channel, Receiver, Sender};
 
+static HR_SENDER: Mutex<Option<Sender<(f64, u8)>>> = Mutex::new(None);
 trait HasCommon {
     fn common(&self) -> &CommonData;
 }
@@ -89,14 +86,22 @@ pub fn create_ant_thread(term: Arc<AtomicBool>, ctx: egui::Context, hr_points: A
         router.send(&snk).expect("failed to set network key");
         let chan = router .add_channel(TxSender { sender: router_tx }).expect("Failed to add ANT channel");
         let config = DisplayConfig { device_number: 0, device_number_extension: 0.into(), channel: chan, period: Period::FourHz, ant_plus_key_index: 0};
-        
-        let hr_points_cb = Arc::clone(&hr_points);
+
+        let (sample_tx, sample_rx) = channel::<(f64, u8)>(16);
+        if let Ok(mut guard) = HR_SENDER.lock() {
+            *guard = Some(sample_tx);
+        }
 
         let mut hr = Display::new( config, TxSender { sender: channel_tx }, RxReceiver { receiver: channel_rx});
         hr.set_rx_datapage_callback(Some(|x| {
             if let Ok(ref page) = x {
-                LATEST_HR.store(page.common().computed_heart_rate, Ordering::Relaxed);
-                HR_SAMPLES.fetch_add(1, Ordering::Relaxed);
+                let heart_rate = page.common().computed_heart_rate;
+                let timestamp = current_fit_time_fine();
+                if let Ok(guard) = HR_SENDER.lock() {
+                    if let Some(ref sender) = *guard {
+                        let _ = sender.try_send((timestamp, heart_rate));
+                    }
+                }
             }
             println!("{:#?}", x);
         }));
@@ -104,31 +109,26 @@ pub fn create_ant_thread(term: Arc<AtomicBool>, ctx: egui::Context, hr_points: A
         hr.set_rx_message_callback(Some(|x| println!("{:#?}", x)));
         hr.open();
 
-        // last sample index
-        let mut last_hr_sample = 0;
 
         while !term.load(Ordering::Relaxed) {
             router.process().unwrap();
             hr.process().unwrap();
 
-            let current_hr_sample = HR_SAMPLES.load(Ordering::Relaxed);
-            if current_hr_sample != last_hr_sample {
-                let timestamp = current_fit_time_fine();
-                let heart_rate = LATEST_HR.load(Ordering::Relaxed);
+            while let Ok((timestamp, heart_rate)) = sample_rx.try_recv() {
                 let relative_x = (timestamp - start_fit_time).max(0.0);
-                if let Ok(mut points) = hr_points_cb.lock() {
+
+                if let Ok(mut points) = hr_points.lock() {
                     points.push([relative_x, heart_rate as f64]);
                 }
 
-                last_hr_sample = current_hr_sample;
-                let hr_value = LATEST_HR.load(Ordering::Relaxed);
-                fit_handler.update_file(timestamp, hr_value).expect("Unable to update FIT file");
+                let _ = fit_handler.update_file(timestamp, heart_rate);
                 ctx.request_repaint();
             }
             sleep(Duration::from_millis(50));
         }
         println!("Exiting...");
         fit_handler.finish_file().expect("Unable to finish FIT file");
+        ctx.request_repaint();
 
     })
 }

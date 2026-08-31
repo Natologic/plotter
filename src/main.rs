@@ -3,8 +3,7 @@ mod ant_handler;
 
 use std::io::Error;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU8, AtomicUsize, AtomicBool, Ordering};
-use std::thread::current;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use egui_plot::{Line, PlotBounds};
 use egui_plot::Plot;
@@ -13,9 +12,6 @@ use egui_plot::PlotPoints;
 use eframe::egui;
 
 use crate::fit_handler::current_fit_time_fine;
-
-pub static LATEST_HR: AtomicU8 = AtomicU8::new(0);
-pub static HR_SAMPLES: AtomicUsize = AtomicUsize::new(0);
 
 pub struct HeartratePlot {
     x_range: f64,
