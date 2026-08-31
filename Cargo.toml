@@ -1,0 +1,15 @@
+[package]
+name = "ant_plus"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ant = { git = "https://github.com/cujomalainey/ant-rs" }
+rustyfit = "0.10.2"
+rusb = "0.9"
+thingbuf = "0.1"
+embedded-io-adapters = { version = "0.7", features = ["std"] }
+signal-hook = "0.4.4"
+egui = "0.36.1"
+egui_plot = "0.37.0"
+eframe = "0.36.1"
