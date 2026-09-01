@@ -71,6 +71,11 @@ impl eframe::App for HeartratePlot {
         }
         self.update_plot(ui);
     }
+
+    fn on_exit(&mut self) {
+        self.term.store(true, Ordering::Relaxed);
+    }
+
 }
 
 fn main() -> Result<(), Error> {
@@ -87,17 +92,16 @@ fn main() -> Result<(), Error> {
         "Heartrate",
         native_options,
         Box::new(|cc| {
-            let ant_handle = ant_handler::create_ant_thread(
-                Arc::clone(&term),
+            ant_handler::create_ant_thread(
+                app_term,
                 cc.egui_ctx.clone(),
                 Arc::clone(&hr_points),
                 start_fit_time,
             );
-            Ok(Box::new(HeartratePlot::new(cc, hr_points, app_term)))    
+            Ok(Box::new(HeartratePlot::new(cc, hr_points, term)))    
         }),
     ).map_err(std::io::Error::other)?;
 
-    term.store(true, Ordering::Relaxed);
 
     Ok(())
 }
