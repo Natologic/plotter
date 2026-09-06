@@ -32,7 +32,7 @@ impl HeartratePlot {
     }
 
     pub fn update_plot(&mut self, ui: &mut egui::Ui) {
-        // get the time
+        // get the points mutex
         let points = self.hr_points.lock().unwrap();
         let x_current = points.last().map(|p| p[0]).unwrap_or(0.0);
 
@@ -81,7 +81,7 @@ impl eframe::App for HeartratePlot {
 fn main() -> Result<(), Error> {
     // Register signal hook and clone it for closing the plot window
     let term = Arc::new(AtomicBool::new(false));
-    let app_term = Arc::clone(&term);
+    let ant_handler_term = Arc::clone(&term);
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&term))?;
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&term))?;
     // initalize the plot
@@ -93,7 +93,7 @@ fn main() -> Result<(), Error> {
         native_options,
         Box::new(|cc| {
             ant_handler::create_ant_thread(
-                app_term,
+                ant_handler_term,
                 cc.egui_ctx.clone(),
                 Arc::clone(&hr_points),
                 start_fit_time,
