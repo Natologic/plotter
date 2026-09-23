@@ -1,21 +1,25 @@
 use crate::fit_handler::FitHandler;
 use crate::fit_handler::current_fit_time_fine;
 
-use std::thread::{JoinHandle, sleep};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::mpsc::{Receiver, Sender};
+use std::time::{Duration, Instant};
 
 use ant::channel::{RxError, RxHandler, TxError, TxHandler};
+use ant::messages::{AntMessage, TxMessage};
 use ant::drivers::{is_ant_usb_device_from_device, UsbDriver};
 use ant::messages::config::SetNetworkKey;
 use ant::plus::profiles::heart_rate::{Display, DisplayConfig, Period, CommonData, MonitorTxDataPage};
 use ant::router::Router;
+use rusb::GlobalContext;
 use rusb::{Device, DeviceList};
 use thingbuf::mpsc::errors::{TryRecvError, TrySendError};
-use thingbuf::mpsc::{channel, Receiver, Sender};
+use thingbuf::mpsc::{channel as channel_thingbuf, Receiver as Receiver_thingbuf, Sender as Sender_thingbuf};
 
-static HR_SENDER: Mutex<Option<Sender<(f64, u8)>>> = Mutex::new(None);
+static CURRENT_HEARTRATE: AtomicU16 = AtomicU16::new(0);
+
 trait HasCommon {
     fn common(&self) -> &CommonData;
 }
@@ -37,11 +41,11 @@ impl HasCommon for MonitorTxDataPage {
     }
 }
 struct TxSender<T> {
-    sender: Sender<T>,
+    sender: Sender_thingbuf<T>,
 }
 
 struct RxReceiver<T> {
-    receiver: Receiver<T>,
+    receiver: Receiver_thingbuf<T>,
 }
 
 impl<T: Default + Clone> TxHandler<T> for TxSender<T> {
@@ -66,11 +70,18 @@ impl<T: Default + Clone> RxHandler<T> for RxReceiver<T> {
     }
 }
 
-pub fn create_ant_thread(term: Arc<AtomicBool>, ctx: egui::Context, hr_points: Arc<Mutex<Vec<[f64; 2]>>>, start_fit_time: f64) -> JoinHandle<()> {
-    std::thread::spawn(move || {
-        // Heartrate variable
-        let mut fit_handler = FitHandler::create_file().expect("Unable to create FIT file");
 
+pub struct AntHandler {
+    fit_handler: FitHandler,
+    router: Router<rusb::Error, UsbDriver<GlobalContext>, TxSender<AntMessage>, RxReceiver<TxMessage>>,
+    hr: Display<TxSender<TxMessage>, RxReceiver<AntMessage>>,
+}
+
+impl AntHandler {
+    pub fn new() -> Result<Self, String> {
+        let fit_handler = FitHandler::create_file().expect("Unable to create FIT file");
+
+        // ant
         // Try to find USB ANT sticks
         let mut devices: Vec<Device<_>> = DeviceList::new().expect("Unable to lookup usb devices").iter().filter(|x| is_ant_usb_device_from_device(x)).collect();
         if devices.is_empty() {
@@ -79,56 +90,61 @@ pub fn create_ant_thread(term: Arc<AtomicBool>, ctx: egui::Context, hr_points: A
         // Just pick the first device we find in the list
         let device = devices.remove(0);
         let driver = UsbDriver::new(device).unwrap();
-        let (channel_tx, router_rx) = channel(8);
-        let (router_tx, channel_rx) = channel(8);
+        let (channel_tx, router_rx) = channel_thingbuf(8);
+        let (router_tx, channel_rx) = channel_thingbuf(8);
         let mut router = Router::new( driver, RxReceiver { receiver: router_rx}).unwrap();
+        
         let snk = SetNetworkKey::new(0, [0xB9, 0xA5, 0x21, 0xFB, 0xBD, 0x72, 0xC3, 0x45]); // Get this from thisisant.com
         router.send(&snk).expect("failed to set network key");
         let chan = router .add_channel(TxSender { sender: router_tx }).expect("Failed to add ANT channel");
         let config = DisplayConfig { device_number: 0, device_number_extension: 0.into(), channel: chan, period: Period::FourHz, ant_plus_key_index: 0};
 
-        let (sample_tx, sample_rx) = channel::<(f64, u8)>(16);
-        if let Ok(mut guard) = HR_SENDER.lock() {
-            *guard = Some(sample_tx);
-        }
-
         let mut hr = Display::new( config, TxSender { sender: channel_tx }, RxReceiver { receiver: channel_rx});
+        
         hr.set_rx_datapage_callback(Some(|x| {
             if let Ok(ref page) = x {
                 let heart_rate = page.common().computed_heart_rate;
-                let timestamp = current_fit_time_fine();
-                if let Ok(guard) = HR_SENDER.lock() {
-                    if let Some(ref sender) = *guard {
-                        let _ = sender.try_send((timestamp, heart_rate));
-                    }
-                }
+                CURRENT_HEARTRATE.store(heart_rate as u16, Ordering::Relaxed);
             }
             println!("{:#?}", x);
         }));
-
         hr.set_rx_message_callback(Some(|x| println!("{:#?}", x)));
         hr.open();
 
+        Ok(Self{fit_handler, router, hr})
+    }
 
-        while !term.load(Ordering::Relaxed) {
-            router.process().unwrap();
-            hr.process().unwrap();
+    pub fn run(mut self, thread_ant_term:Arc<AtomicBool>, egui_ctx_rx: Receiver<egui::Context>, heartrate_value_tx: Sender<[f64; 2]>) {
+        // get the egui context so we can request to repaint it later
+        let ctx = egui_ctx_rx.recv().unwrap();
 
-            while let Ok((timestamp, heart_rate)) = sample_rx.try_recv() {
-                let relative_x = (timestamp - start_fit_time).max(0.0);
+        let start_fit_time = current_fit_time_fine();
+        let mut last_sent = Instant::now();
 
-                if let Ok(mut points) = hr_points.lock() {
-                    points.push([relative_x, heart_rate as f64]);
-                }
+        // run this thread in a loop until we get the terminator
+        while !thread_ant_term.load(Ordering::Relaxed) {
+            self.router.process().unwrap();
+            self.hr.process().unwrap();
 
-                let _ = fit_handler.update_file(timestamp, heart_rate);
+            if last_sent.elapsed() >= Duration::from_millis(300) {
+                let timestamp = current_fit_time_fine();
+                let fit_offset = timestamp - start_fit_time;
+                let heart_rate = CURRENT_HEARTRATE.load(Ordering::Relaxed) as f64;
+                heartrate_value_tx.send([fit_offset, heart_rate]).map_err(|err| println!("{:?}", err)).ok();
                 ctx.request_repaint();
+                let _ = self.fit_handler.update_file(timestamp, heart_rate as u8);
+                last_sent = Instant::now();
             }
-            sleep(Duration::from_millis(50));
         }
-        println!("Exiting...");
-        fit_handler.finish_file().expect("Unable to finish FIT file");
+        println!("ANT thread termination received");
+        self.fit_handler.finish_file().expect("Unable to finish FIT file");
         ctx.request_repaint();
+    }
 
-    })
 }
+
+
+
+
+
+

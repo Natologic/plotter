@@ -183,7 +183,7 @@ fn main() -> Result<(), Error> {
         let mut router = Router::new( driver, RxReceiver { receiver: router_rx}).unwrap();
         let snk = SetNetworkKey::new(0, [0xB9, 0xA5, 0x21, 0xFB, 0xBD, 0x72, 0xC3, 0x45]); // Get this from thisisant.com
         router.send(&snk).expect("failed to set network key");
-        let chan = router .add_channel(TxSender { sender: router_tx }).expect("Failed to add ANT channel");
+        let chan = router.add_channel(TxSender { sender: router_tx }).expect("Failed to add ANT channel");
         let config = DisplayConfig { device_number: 0, device_number_extension: 0.into(), channel: chan, period: Period::FourHz, ant_plus_key_index: 0};
 
         let mut hr = Display::new( config, TxSender { sender: channel_tx }, RxReceiver { receiver: channel_rx});

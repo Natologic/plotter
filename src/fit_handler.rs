@@ -1,12 +1,11 @@
 use std::io::Error;
 
-use std::thread::current;
 use std::time::{SystemTime, UNIX_EPOCH};
 use embedded_io_adapters::std::FromStd;
 use rustyfit::StreamEncoder;
 use rustyfit::{Encoder, profile::{mesgdef, typedef}, proto::Message};
 use std::{fs::File, io::{BufWriter}};
-use rustyfit::profile::typedef::{DateTime, LocalDateTime};
+use rustyfit::profile::typedef::{DateTime};
 
 pub fn current_fit_time_fine() -> f64 {
     // Subtract the epoch from the current time. FIT epoch starts 1989-12-31T00:00:00Z which is 631065600
@@ -63,7 +62,7 @@ impl FitHandler {
         Ok(())
     }
 
-    pub fn finish_file (mut self) -> Result<(), Error> {
+    pub fn finish_file (&mut self) -> Result<(), Error> {
         let current_ts = current_fit_time_fine() as u32;
         let duration = current_ts - self.start_ts;
         let duration_sec = duration * 1000;
