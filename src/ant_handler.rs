@@ -3,7 +3,7 @@ use crate::fit_handler::current_fit_time_fine;
 
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -75,10 +75,11 @@ pub struct AntHandler {
     fit_handler: FitHandler,
     router: Router<rusb::Error, UsbDriver<GlobalContext>, TxSender<AntMessage>, RxReceiver<TxMessage>>,
     hr: Display<TxSender<TxMessage>, RxReceiver<AntMessage>>,
+    period_ms: Arc<AtomicU32>,
 }
 
 impl AntHandler {
-    pub fn new() -> Result<Self, String> {
+    pub fn new(period_ms: Arc<AtomicU32>) -> Result<Self, String> {
         let fit_handler = FitHandler::create_file().expect("Unable to create FIT file");
 
         // ant
@@ -111,7 +112,7 @@ impl AntHandler {
         hr.set_rx_message_callback(Some(|x| println!("{:#?}", x)));
         hr.open();
 
-        Ok(Self{fit_handler, router, hr})
+        Ok(Self{fit_handler, router, hr, period_ms})
     }
 
     pub fn run(mut self, thread_ant_term:Arc<AtomicBool>, egui_ctx_rx: Receiver<egui::Context>, heartrate_value_tx: Sender<[f64; 2]>) {
@@ -126,7 +127,7 @@ impl AntHandler {
             self.router.process().unwrap();
             self.hr.process().unwrap();
 
-            if last_sent.elapsed() >= Duration::from_millis(300) {
+            if last_sent.elapsed() >= Duration::from_millis((self.period_ms.load(Ordering::Relaxed) as u64)) {
                 let timestamp = current_fit_time_fine();
                 let fit_offset = timestamp - start_fit_time;
                 let heart_rate = CURRENT_HEARTRATE.load(Ordering::Relaxed) as f64;
