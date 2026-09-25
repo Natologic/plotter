@@ -16,6 +16,12 @@ use egui_plot::{Plot, PlotPoints, PlotBounds, Line};
 
 struct MyApp {
     period_ms: Arc<AtomicU32>,
+    rolling_x: bool,
+    rolling_x_window: f64,
+    min_x_bound: f64,
+    min_y_bound: f64,
+    max_x_bound: f64,
+    max_y_bound: f64,
     current_heartrate: u32,
     current_time: f64,
     heartrate_value_rx: Receiver<[f64; 2]>,
@@ -27,22 +33,18 @@ impl MyApp {
     fn new(period_ms: Arc<AtomicU32>, heartrate_value_rx: Receiver<[f64; 2]>, thread_gui_term: Arc<AtomicBool>) -> Self {
         Self {
             period_ms,
+            rolling_x: true,
+            rolling_x_window: 20.0,
+            min_x_bound: 0.0,
+            min_y_bound: 0.0,
+            max_x_bound: 10.0,
+            max_y_bound: 300.0,
             current_heartrate: 0,
             current_time: 0.0,
             heartrate_value_rx,
             thread_gui_term,
             heartrate_values: Vec::new(),
         }
-    }
-
-    fn show_plot(&mut self, ui: &mut egui::Ui) {
-        let plot_points = PlotPoints::from_iter(self.heartrate_values.iter().copied());
-        let line = Line::new("HR", plot_points);
-        let plot = Plot::new("lines_demo");
-        
-        plot.show(ui, |plot_ui| {
-            plot_ui.line(line);
-        });
     }
 }
 
@@ -55,17 +57,57 @@ impl eframe::App for MyApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::Panel::top("menu").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
-                egui::menu::MenuButton::new("File")
-                    .config(egui::menu::MenuConfig::default().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
-                    .ui(ui, |ui| {
-                    if ui.button("1").clicked() {
-                        println!("1 clicked");
-                        ui.close();
-                    }
-                    if ui.button("2").clicked() {
-                        println!("2 clicked");
-                        ui.close();
-                    }
+                egui::menu::MenuButton::new("Bounds")
+                .config(egui::menu::MenuConfig::default().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
+                .ui(ui, |ui| {
+                    ui.checkbox(&mut self.rolling_x, "Rolling X");
+                    // Grey out the x controls if rolling is checked
+                    ui.add_enabled_ui(self.rolling_x, |ui| {
+                        ui.horizontal(|ui: &mut egui::Ui| {
+                            ui.label("Rolling X Window:");
+                            let mut value = self.rolling_x_window;
+                            if ui.add(egui::DragValue::new(&mut value)).changed() {
+                                // Cap min rolling x window at something small (5)
+                                self.rolling_x_window = value.max(5.0);
+                            }
+                        });
+                    });
+                    ui.add_enabled_ui(!self.rolling_x, |ui| {
+                        ui.horizontal(|ui: &mut egui::Ui| {
+                            ui.label("X Min:");
+                            let mut value = self.min_x_bound;
+                            if ui.add(egui::DragValue::new(&mut value)).changed() {
+                                // Cap if min value is greater than max value
+                                self.min_x_bound = value.min(self.max_x_bound);
+                            }
+                        });
+                        ui.horizontal(|ui: &mut egui::Ui| {
+                            ui.label("X Max:");
+                            let mut value = self.max_x_bound;
+                            if ui.add(egui::DragValue::new(&mut value)).changed() {
+                                // Cap if max value is less than min value
+                                self.max_x_bound = value.max(self.min_x_bound);
+                            }
+                        });
+                    });
+                    ui.separator();
+                    // Show the y controls regardless of rolling x
+                    ui.horizontal(|ui: &mut egui::Ui| {
+                        ui.label("Y Min:");
+                        let mut value = self.min_y_bound;
+                        if ui.add(egui::DragValue::new(&mut value)).changed() {
+                            // Cap if min value is greater than max value
+                            self.min_y_bound = value.min(self.max_y_bound);
+                        }
+                    });
+                    ui.horizontal(|ui: &mut egui::Ui| {
+                        ui.label("Y Max:");
+                        let mut value = self.max_y_bound;
+                        if ui.add(egui::DragValue::new(&mut value)).changed() {
+                            // Cap if max value is less than min value
+                            self.max_y_bound = value.max(self.min_y_bound);
+                        }
+                    });
                     ui.separator();
                     ui.horizontal(|ui: &mut egui::Ui| {
                         ui.label("Period:");
@@ -94,6 +136,7 @@ impl eframe::App for MyApp {
                 // if the term is already set then close the viewport
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
             }
+
             // Update the heartrate and time variables if we receive an updated heartrate
             if let Ok(msg) = self.heartrate_value_rx.try_recv() {
                 println!("Received: {:?}", msg);
@@ -108,7 +151,26 @@ impl eframe::App for MyApp {
             ui.label(format!("Time {}", self.current_time));
             ui.label(format!("Period {}", self.period_ms.load(Ordering::Relaxed)));
 
-            self.show_plot(ui);
+
+            let plot_points = PlotPoints::from_iter(self.heartrate_values.iter().copied());
+            let line = Line::new("HR", plot_points);
+            let plot = Plot::new("lines_demo");
+
+            let mut xmin = self.min_x_bound;
+            let mut xmax = self.max_x_bound;
+            let ymin = self.min_y_bound;
+            let ymax = self.max_y_bound;
+            
+            plot.show(ui, |plot_ui| {
+                plot_ui.line(line);
+                if self.rolling_x {
+                    xmin = (self.current_time - self.rolling_x_window).max(0.0);
+                    xmax = self.current_time;
+                }
+                plot_ui.set_plot_bounds(PlotBounds::from_min_max([xmin, ymin],[xmax, ymax]));
+
+            });
+
         });
     }
 

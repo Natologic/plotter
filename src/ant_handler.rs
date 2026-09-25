@@ -127,7 +127,7 @@ impl AntHandler {
             self.router.process().unwrap();
             self.hr.process().unwrap();
 
-            if last_sent.elapsed() >= Duration::from_millis((self.period_ms.load(Ordering::Relaxed) as u64)) {
+            if last_sent.elapsed() >= Duration::from_millis(self.period_ms.load(Ordering::Relaxed) as u64) {
                 let timestamp = current_fit_time_fine();
                 let fit_offset = timestamp - start_fit_time;
                 let heart_rate = CURRENT_HEARTRATE.load(Ordering::Relaxed) as f64;
