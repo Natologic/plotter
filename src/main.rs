@@ -139,7 +139,7 @@ impl eframe::App for MyApp {
 
             // Update the heartrate and time variables if we receive an updated heartrate
             if let Ok(msg) = self.heartrate_value_rx.try_recv() {
-                println!("Received: {:?}", msg);
+                // println!("Received: {:?}", msg);
                 self.heartrate_values.push(msg);
                 self.current_heartrate = msg[1] as u32;
                 self.current_time = msg[0];

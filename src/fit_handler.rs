@@ -46,16 +46,16 @@ impl FitHandler {
 
         // only save if we are greater than last time
         if current_ts > self.last_ts {
-            println!(
-                "FIT file updated: HR: {}, current_ts: {}, last_ts: {}",
-                heart_rate, current_ts, self.last_ts
-            );
             self.stream.write_message(&mut {
                 let mut record = mesgdef::Record::new();
                 record.timestamp = DateTime(current_ts);
                 record.heart_rate = heart_rate;
                 Message::from(record)
             }).map_err(std::io::Error::other)?;
+            println!(
+                "FIT file updated: HR: {}, current_ts: {}, last_ts: {}",
+                heart_rate, current_ts, self.last_ts
+            );
             self.last_ts = current_ts;
         }
 

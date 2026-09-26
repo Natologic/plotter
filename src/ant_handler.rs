@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use ant::channel::{RxError, RxHandler, TxError, TxHandler};
 use ant::messages::{AntMessage, TxMessage};
 use ant::drivers::{is_ant_usb_device_from_device, UsbDriver};
-use ant::messages::config::SetNetworkKey;
+use ant::messages::config::{SetNetworkKey,SearchTimeout};
 use ant::plus::profiles::heart_rate::{Display, DisplayConfig, Period, CommonData, MonitorTxDataPage};
 use ant::router::Router;
 use rusb::GlobalContext;
@@ -19,6 +19,9 @@ use thingbuf::mpsc::errors::{TryRecvError, TrySendError};
 use thingbuf::mpsc::{channel as channel_thingbuf, Receiver as Receiver_thingbuf, Sender as Sender_thingbuf};
 
 static CURRENT_HEARTRATE: AtomicU16 = AtomicU16::new(0);
+static LAST_HEART_BEAT_COUNT: AtomicU32 = AtomicU32::new(0);
+static STALE_HEART_BEAT_COUNT: AtomicU16 = AtomicU16::new(0);
+static NEEDS_REOPEN: AtomicBool = AtomicBool::new(false);
 
 trait HasCommon {
     fn common(&self) -> &CommonData;
@@ -97,19 +100,61 @@ impl AntHandler {
         
         let snk = SetNetworkKey::new(0, [0xB9, 0xA5, 0x21, 0xFB, 0xBD, 0x72, 0xC3, 0x45]); // Get this from thisisant.com
         router.send(&snk).expect("failed to set network key");
-        let chan = router .add_channel(TxSender { sender: router_tx }).expect("Failed to add ANT channel");
+        let chan = router.add_channel(TxSender { sender: router_tx }).expect("Failed to add ANT channel");
+        let search_timeout = SearchTimeout::new(chan, 255);
+        router.send(&search_timeout).expect("failed to set search timeout");
         let config = DisplayConfig { device_number: 0, device_number_extension: 0.into(), channel: chan, period: Period::FourHz, ant_plus_key_index: 0};
 
         let mut hr = Display::new( config, TxSender { sender: channel_tx }, RxReceiver { receiver: channel_rx});
-        
-        hr.set_rx_datapage_callback(Some(|x| {
-            if let Ok(ref page) = x {
+
+
+        // save the computed heartrate if we get it 
+        hr.set_rx_datapage_callback(Some(|msg| {
+            if let Ok(ref page) = msg {
+                // get the reported hr and beat count
                 let heart_rate = page.common().computed_heart_rate;
-                CURRENT_HEARTRATE.store(heart_rate as u16, Ordering::Relaxed);
+                let heart_beat_count = page.common().heart_beat_count;
+                // if the current beat count is the same as the last one
+                if LAST_HEART_BEAT_COUNT.load(Ordering::Relaxed) == heart_beat_count as u32 {
+                    // increment the counter
+                    let stale_count = STALE_HEART_BEAT_COUNT.fetch_add(1, Ordering::Relaxed);
+                    // if it's been stale for too long, then just report 0
+                    if stale_count >= 10 {
+                        CURRENT_HEARTRATE.store(0, Ordering::Relaxed);
+                    }
+                    // otherwise, continue reporting as if everything's ok
+                    else {
+                        CURRENT_HEARTRATE.store(heart_rate as u16, Ordering::Relaxed);
+                    }
+                }
+                else {
+                    STALE_HEART_BEAT_COUNT.store(0, Ordering::Relaxed);
+                    CURRENT_HEARTRATE.store(heart_rate as u16, Ordering::Relaxed);
+                    LAST_HEART_BEAT_COUNT.store(heart_beat_count as u32, Ordering::Relaxed);
+                }
             }
-            println!("{:#?}", x);
+            println!("{:#?}", msg);
         }));
-        hr.set_rx_message_callback(Some(|x| println!("{:#?}", x)));
+        // look for timeout messages
+        hr.set_rx_message_callback(Some(|msg|{
+            if let ant::messages::RxMessage::ChannelEvent(ref event) = msg.message {
+                match event.payload.message_code {
+                    ant::messages::channel::MessageCode::EventRxFailGoToSearch => {
+                        println!("event RX failed, start searching");
+                        // set the current heatrate to 0
+                        CURRENT_HEARTRATE.store(0, Ordering::Relaxed); 
+                    }
+                    ant::messages::channel::MessageCode::EventRxSearchTimeout => {
+                        println!("event RX timeout failed, indicate need to re open channel");
+                        NEEDS_REOPEN.store(true, Ordering::Relaxed);
+                    }
+                    // fallthrough
+                    _ => {}
+                }
+            }
+            println!("{:#?}", msg);
+        }));
+
         hr.open();
 
         Ok(Self{fit_handler, router, hr, period_ms})
@@ -121,6 +166,7 @@ impl AntHandler {
 
         let start_fit_time = current_fit_time_fine();
         let mut last_sent = Instant::now();
+
 
         // run this thread in a loop until we get the terminator
         while !thread_ant_term.load(Ordering::Relaxed) {
@@ -136,6 +182,13 @@ impl AntHandler {
                 let _ = self.fit_handler.update_file(timestamp, heart_rate as u8);
                 last_sent = Instant::now();
             }
+
+            if NEEDS_REOPEN.load(Ordering::Relaxed) {
+                println!("re-open ANT channel");
+                self.hr.open();
+                NEEDS_REOPEN.store(false, Ordering::Relaxed);
+            }
+
         }
         println!("ANT thread termination received");
         self.fit_handler.finish_file().expect("Unable to finish FIT file");
