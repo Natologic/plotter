@@ -12,6 +12,8 @@ use std::thread;
 use eframe::egui;
 use egui_plot::{Plot, PlotPoints, PlotBounds, Line};
 
+use windows_sys::Win32::System::Console::{GetStdHandle, GetConsoleMode, SetConsoleMode, CONSOLE_MODE, ENABLE_QUICK_EDIT_MODE, STD_INPUT_HANDLE};
+
 
 
 struct MyApp {
@@ -34,11 +36,11 @@ impl MyApp {
         Self {
             period_ms,
             rolling_x: true,
-            rolling_x_window: 20.0,
+            rolling_x_window: 60.0,
             min_x_bound: 0.0,
             min_y_bound: 0.0,
             max_x_bound: 10.0,
-            max_y_bound: 300.0,
+            max_y_bound: 200.0,
             current_heartrate: 0,
             current_time: 0.0,
             heartrate_value_rx,
@@ -145,16 +147,14 @@ impl eframe::App for MyApp {
                 self.current_time = msg[0];
             }
 
-            ui.heading("Heartrate");
-
-            ui.label(format!("Heartrate {}",  self.current_heartrate));
-            ui.label(format!("Time {}", self.current_time));
-            ui.label(format!("Period {}", self.period_ms.load(Ordering::Relaxed)));
-
+            ui.label(format!("Heartrate: {}bpm",  self.current_heartrate));
+            ui.label(format!("Time: {}s", self.current_time.round() as i32));
 
             let plot_points = PlotPoints::from_iter(self.heartrate_values.iter().copied());
             let line = Line::new("HR", plot_points);
-            let plot = Plot::new("lines_demo");
+            let plot = Plot::new("lines_demo")
+                .x_axis_label("Time [s]")
+                .y_axis_label("Heartrate [bpm]");
 
             let mut xmin = self.min_x_bound;
             let mut xmax = self.max_x_bound;
@@ -177,7 +177,25 @@ impl eframe::App for MyApp {
 
 }
 
+#[cfg(windows)]
+fn windows_disable_quickedit() {
+    unsafe {
+        let handle = GetStdHandle(STD_INPUT_HANDLE);
+        let mut mode: CONSOLE_MODE = 0;
+        let current_mode = GetConsoleMode(handle, &mut mode);
+        if current_mode != 0 {
+            use windows_sys::Win32::System::Console::ENABLE_EXTENDED_FLAGS;
+            mode &= !ENABLE_QUICK_EDIT_MODE;
+            mode |= ENABLE_EXTENDED_FLAGS;
+            SetConsoleMode(handle, mode);
+        }
+    }
+}
 fn main() -> Result<(), Error> {
+    // immediately disable quickedit so clicking into the window doesn't freeze the thread
+    #[cfg(windows)]
+    windows_disable_quickedit();
+
     // thread terminators
     let thread_main_term = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&thread_main_term))?;
@@ -204,7 +222,7 @@ fn main() -> Result<(), Error> {
         ..Default::default()
     };
     eframe::run_native(
-        "My egui App",
+        "Heartrate Monitor",
         options,
         Box::new(|cc| {
             let _ = egui_ctx_tx.send(cc.egui_ctx.clone());

@@ -1,7 +1,6 @@
 use crate::fit_handler::FitHandler;
 use crate::fit_handler::current_fit_time_fine;
 
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
@@ -183,10 +182,9 @@ impl AntHandler {
                 last_sent = Instant::now();
             }
 
-            if NEEDS_REOPEN.load(Ordering::Relaxed) {
+            if NEEDS_REOPEN.swap(false, Ordering::Relaxed) {
                 println!("re-open ANT channel");
                 self.hr.open();
-                NEEDS_REOPEN.store(false, Ordering::Relaxed);
             }
 
         }
@@ -196,9 +194,3 @@ impl AntHandler {
     }
 
 }
-
-
-
-
-
-
