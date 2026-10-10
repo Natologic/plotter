@@ -133,7 +133,8 @@ impl eframe::App for MyApp {
 
         });
 
-        egui::CentralPanel::default().show(ui, |ui| {
+        egui::CentralPanel::default()
+        .show(ui, |ui| {
             if self.thread_gui_term.load(Ordering::Relaxed) {
                 // if the term is already set then close the viewport
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -147,11 +148,26 @@ impl eframe::App for MyApp {
                 self.current_time = msg[0];
             }
 
-            ui.label(format!("Heartrate: {}bpm",  self.current_heartrate));
-            ui.label(format!("Time: {}s", self.current_time.round() as i32));
+            ui.scope(|ui| {
+                ui.horizontal(|ui| {
+                    ui.style_mut().spacing.item_spacing.x = 0.0; 
+                    ui.label(
+                        egui::RichText::new(format!("{}bpm", self.current_heartrate))
+                            .size(24.0)
+                            .strong()
+                            .color(egui::Color32::RED)
+                    );
+                    ui.label(
+                        egui::RichText::new(format!("{}s", self.current_time.round() as i32))
+                            .size(24.0)
+                            .strong()
+                            .color(egui::Color32::BLACK)
+                    );
+                });
+            });
 
             let plot_points = PlotPoints::from_iter(self.heartrate_values.iter().copied());
-            let line = Line::new("HR", plot_points);
+            let line = Line::new("HR", plot_points).width(3.0).color(egui::Color32::BLUE);
             let plot = Plot::new("lines_demo")
                 .x_axis_label("Time [s]")
                 .y_axis_label("Heartrate [bpm]");

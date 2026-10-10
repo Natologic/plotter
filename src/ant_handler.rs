@@ -93,8 +93,8 @@ impl AntHandler {
         // Just pick the first device we find in the list
         let device = devices.remove(0);
         let driver = UsbDriver::new(device).unwrap();
-        let (channel_tx, router_rx) = channel_thingbuf(8);
-        let (router_tx, channel_rx) = channel_thingbuf(8);
+        let (channel_tx, router_rx) = channel_thingbuf(64);
+        let (router_tx, channel_rx) = channel_thingbuf(64);
         let mut router = Router::new( driver, RxReceiver { receiver: router_rx}).unwrap();
         
         let snk = SetNetworkKey::new(0, [0xB9, 0xA5, 0x21, 0xFB, 0xBD, 0x72, 0xC3, 0x45]); // Get this from thisisant.com
@@ -169,8 +169,8 @@ impl AntHandler {
 
         // run this thread in a loop until we get the terminator
         while !thread_ant_term.load(Ordering::Relaxed) {
-            self.router.process().unwrap();
-            self.hr.process().unwrap();
+            self.router.process().ok();
+            self.hr.process().ok();
 
             if last_sent.elapsed() >= Duration::from_millis(self.period_ms.load(Ordering::Relaxed) as u64) {
                 let timestamp = current_fit_time_fine();
