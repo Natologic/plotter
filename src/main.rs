@@ -1,6 +1,7 @@
 mod fit_handler;
 mod ant_handler;
 
+use ant::messages::config;
 use ant_handler::AntHandler;
 
 use std::io::Error;
@@ -9,86 +10,127 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{channel, Receiver};
 use std::thread;
 
+
 use eframe::egui;
 use egui_plot::{Plot, PlotPoints, PlotBounds, Line};
 
 use windows_sys::Win32::System::Console::{GetStdHandle, GetConsoleMode, SetConsoleMode, CONSOLE_MODE, ENABLE_QUICK_EDIT_MODE, STD_INPUT_HANDLE};
 
+use serde::{Serialize, Deserialize};
+use serde_json;
 
-
-struct MyApp {
-    period_ms: Arc<AtomicU32>,
+#[derive(Serialize, Deserialize, Debug)]
+struct Config {
+    period_ms: u32,
     rolling_x: bool,
     rolling_x_window: f64,
     min_x_bound: f64,
     min_y_bound: f64,
     max_x_bound: f64,
     max_y_bound: f64,
-    current_heartrate: u32,
-    current_time: f64,
-    heartrate_value_rx: Receiver<[f64; 2]>,
-    thread_gui_term: Arc<AtomicBool>,
-    heartrate_values: Vec<[f64; 2]>,
+    window_width: f32,
+    window_height: f32,
 }
 
-impl MyApp {
-    fn new(period_ms: Arc<AtomicU32>, heartrate_value_rx: Receiver<[f64; 2]>, thread_gui_term: Arc<AtomicBool>) -> Self {
+impl Default for Config{
+    fn default() -> Self {
         Self {
-            period_ms,
+            period_ms: 300,
             rolling_x: true,
             rolling_x_window: 60.0,
             min_x_bound: 0.0,
             min_y_bound: 0.0,
             max_x_bound: 10.0,
             max_y_bound: 200.0,
+            window_width: 400.0,
+            window_height: 300.0,
+        }
+    }
+}
+
+struct MyApp {
+    period_ms: Arc<AtomicU32>,
+    current_heartrate: u32,
+    current_time: f64,
+    heartrate_value_rx: Receiver<[f64; 2]>,
+    thread_gui_term: Arc<AtomicBool>,
+    heartrate_values: Vec<[f64; 2]>,
+    config: Config,
+    config_path: std::path::PathBuf,
+}
+
+impl MyApp {
+    fn new(period_ms: Arc<AtomicU32>, heartrate_value_rx: Receiver<[f64; 2]>, thread_gui_term: Arc<AtomicBool>, config: Config, config_path: std::path::PathBuf) -> Self {
+        Self {
+            period_ms,
             current_heartrate: 0,
             current_time: 0.0,
             heartrate_value_rx,
             thread_gui_term,
             heartrate_values: Vec::new(),
+            config,
+            config_path,
+        }
+    }
+
+    fn save_config(&self) {
+        match serde_json::to_string_pretty(&self.config) {
+            Ok(json) => {
+                match std::fs::write(&self.config_path, json) {
+                    Ok(_) => println!("Successfully saved config to: {:?}", self.config_path),
+                    Err(e) => eprintln!("FAILED to write config file: {:?}", e),
+                }
+            }
+            Err(e) => eprintln!("FAILED to serialize config: {:?}", e),
         }
     }
 }
 
 impl eframe::App for MyApp {
     fn on_exit(&mut self) {
+        self.save_config();
         // if the window is closed out then set the term to true
         self.thread_gui_term.store(true, Ordering::Relaxed);
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // keep track of window size
+        let size = ui.ctx().content_rect();
+        self.config.window_width = size.width();
+        self.config.window_height = size.height();
+
         egui::Panel::top("menu").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 egui::menu::MenuButton::new("Bounds")
                 .config(egui::menu::MenuConfig::default().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
                 .ui(ui, |ui| {
-                    ui.checkbox(&mut self.rolling_x, "Rolling X");
+                    ui.checkbox(&mut self.config.rolling_x, "Rolling X");
                     // Grey out the x controls if rolling is checked
-                    ui.add_enabled_ui(self.rolling_x, |ui| {
+                    ui.add_enabled_ui(self.config.rolling_x, |ui| {
                         ui.horizontal(|ui: &mut egui::Ui| {
                             ui.label("Rolling X Window:");
-                            let mut value = self.rolling_x_window;
+                            let mut value = self.config.rolling_x_window;
                             if ui.add(egui::DragValue::new(&mut value)).changed() {
                                 // Cap min rolling x window at something small (5)
-                                self.rolling_x_window = value.max(5.0);
+                                self.config.rolling_x_window = value.max(5.0);
                             }
                         });
                     });
-                    ui.add_enabled_ui(!self.rolling_x, |ui| {
+                    ui.add_enabled_ui(!self.config.rolling_x, |ui| {
                         ui.horizontal(|ui: &mut egui::Ui| {
                             ui.label("X Min:");
-                            let mut value = self.min_x_bound;
+                            let mut value = self.config.min_x_bound;
                             if ui.add(egui::DragValue::new(&mut value)).changed() {
                                 // Cap if min value is greater than max value
-                                self.min_x_bound = value.min(self.max_x_bound);
+                                self.config.min_x_bound = value.min(self.config.max_x_bound);
                             }
                         });
                         ui.horizontal(|ui: &mut egui::Ui| {
                             ui.label("X Max:");
-                            let mut value = self.max_x_bound;
+                            let mut value = self.config.max_x_bound;
                             if ui.add(egui::DragValue::new(&mut value)).changed() {
                                 // Cap if max value is less than min value
-                                self.max_x_bound = value.max(self.min_x_bound);
+                                self.config.max_x_bound = value.max(self.config.min_x_bound);
                             }
                         });
                     });
@@ -96,18 +138,18 @@ impl eframe::App for MyApp {
                     // Show the y controls regardless of rolling x
                     ui.horizontal(|ui: &mut egui::Ui| {
                         ui.label("Y Min:");
-                        let mut value = self.min_y_bound;
+                        let mut value = self.config.min_y_bound;
                         if ui.add(egui::DragValue::new(&mut value)).changed() {
                             // Cap if min value is greater than max value
-                            self.min_y_bound = value.min(self.max_y_bound);
+                            self.config.min_y_bound = value.min(self.config.max_y_bound);
                         }
                     });
                     ui.horizontal(|ui: &mut egui::Ui| {
                         ui.label("Y Max:");
-                        let mut value = self.max_y_bound;
+                        let mut value = self.config.max_y_bound;
                         if ui.add(egui::DragValue::new(&mut value)).changed() {
                             // Cap if max value is less than min value
-                            self.max_y_bound = value.max(self.min_y_bound);
+                            self.config.max_y_bound = value.max(self.config.min_y_bound);
                         }
                     });
                     ui.separator();
@@ -116,6 +158,7 @@ impl eframe::App for MyApp {
                         let mut period = self.period_ms.load(Ordering::Relaxed);
                         if ui.add(egui::DragValue::new(&mut period)).changed() {
                             self.period_ms.store(period, Ordering::Relaxed);
+                            self.config.period_ms = period;
                         }
                     });
                 });
@@ -172,15 +215,15 @@ impl eframe::App for MyApp {
                 .x_axis_label("Time [s]")
                 .y_axis_label("Heartrate [bpm]");
 
-            let mut xmin = self.min_x_bound;
-            let mut xmax = self.max_x_bound;
-            let ymin = self.min_y_bound;
-            let ymax = self.max_y_bound;
+            let mut xmin = self.config.min_x_bound;
+            let mut xmax = self.config.max_x_bound;
+            let ymin = self.config.min_y_bound;
+            let ymax = self.config.max_y_bound;
             
             plot.show(ui, |plot_ui| {
                 plot_ui.line(line);
-                if self.rolling_x {
-                    xmin = (self.current_time - self.rolling_x_window).max(0.0);
+                if self.config.rolling_x {
+                    xmin = (self.current_time - self.config.rolling_x_window).max(0.0);
                     xmax = self.current_time;
                 }
                 plot_ui.set_plot_bounds(PlotBounds::from_min_max([xmin, ymin],[xmax, ymax]));
@@ -212,6 +255,18 @@ fn main() -> Result<(), Error> {
     #[cfg(windows)]
     windows_disable_quickedit();
 
+    // config file
+    let mut config_path = std::env::current_exe()?;
+    config_path.pop();
+    config_path.push("config.json");
+    // create one if it doesn't exist
+    if !config_path.exists() {
+        let config_default = Config::default();
+        std::fs::write(&config_path, serde_json::to_string_pretty(&config_default).unwrap())?;
+        println!("Default JSON config created at: {:?}", config_path);
+    }
+    let config: Config = serde_json::from_str(&std::fs::read_to_string(&config_path)?).unwrap();
+
     // thread terminators
     let thread_main_term = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&thread_main_term))?;
@@ -220,7 +275,7 @@ fn main() -> Result<(), Error> {
     let thread_gui_term = Arc::clone(&thread_main_term);
 
     // polling period atomic
-    let thread_period_ms = Arc::new(AtomicU32::new(300));
+    let thread_period_ms = Arc::new(AtomicU32::new(config.period_ms));
     let clone_period_ms = Arc::clone(&thread_period_ms);
 
     let (egui_ctx_tx, egui_ctx_rx) = channel::<egui::Context>();
@@ -234,7 +289,7 @@ fn main() -> Result<(), Error> {
 
     // Finally run egui in the main thread
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([320.0, 240.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([config.window_width, config.window_height]),
         ..Default::default()
     };
     eframe::run_native(
@@ -242,7 +297,7 @@ fn main() -> Result<(), Error> {
         options,
         Box::new(|cc| {
             let _ = egui_ctx_tx.send(cc.egui_ctx.clone());
-            Ok(Box::<MyApp>::new(MyApp::new(clone_period_ms, heartrate_value_rx, thread_gui_term)))
+            Ok(Box::<MyApp>::new(MyApp::new(clone_period_ms, heartrate_value_rx, thread_gui_term, config, config_path.clone())))
         }),
     ).map_err(|err| println!("{:?}", err)).ok();
     println!("Closed egui");

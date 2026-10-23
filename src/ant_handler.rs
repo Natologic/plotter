@@ -132,7 +132,7 @@ impl AntHandler {
                     LAST_HEART_BEAT_COUNT.store(heart_beat_count as u32, Ordering::Relaxed);
                 }
             }
-            println!("{:#?}", msg);
+            // println!("{:#?}", msg);
         }));
         // look for timeout messages
         hr.set_rx_message_callback(Some(|msg|{
@@ -151,7 +151,7 @@ impl AntHandler {
                     _ => {}
                 }
             }
-            println!("{:#?}", msg);
+            // println!("{:#?}", msg);
         }));
 
         hr.open();
@@ -169,8 +169,14 @@ impl AntHandler {
 
         // run this thread in a loop until we get the terminator
         while !thread_ant_term.load(Ordering::Relaxed) {
-            self.router.process().ok();
-            self.hr.process().ok();
+            // self.router.process().ok();
+            // self.hr.process().ok();
+            if let Err(e) = self.router.process() {
+                println!("Router process error: {:?}", e);
+            }
+            if let Err(e) = self.hr.process() {
+                println!("HR process error: {:?}", e);
+            }
 
             if last_sent.elapsed() >= Duration::from_millis(self.period_ms.load(Ordering::Relaxed) as u64) {
                 let timestamp = current_fit_time_fine();
@@ -186,6 +192,7 @@ impl AntHandler {
                 println!("re-open ANT channel");
                 self.hr.open();
             }
+            std::thread::sleep(Duration::from_millis(10));
 
         }
         println!("ANT thread termination received");
