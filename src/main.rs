@@ -30,6 +30,8 @@ struct Config {
     max_y_bound: f64,
     window_width: f32,
     window_height: f32,
+    display_hrm: bool,
+    display_time: bool,
 }
 
 impl Default for Config{
@@ -44,6 +46,8 @@ impl Default for Config{
             max_y_bound: 200.0,
             window_width: 400.0,
             window_height: 300.0,
+            display_hrm: true,
+            display_time: true,
         }
     }
 }
@@ -98,6 +102,8 @@ impl eframe::App for MyApp {
         let size = ui.ctx().content_rect();
         self.config.window_width = size.width();
         self.config.window_height = size.height();
+
+        ui.ctx().set_visuals(egui::Visuals::dark());
 
         egui::Panel::top("menu").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
@@ -162,15 +168,9 @@ impl eframe::App for MyApp {
                         }
                     });
                 });
-                ui.menu_button("New", |ui| {
-                    if ui.button("1").clicked() {
-                        println!("1 clicked");
-                        ui.close();
-                    }
-                    if ui.button("2").clicked() {
-                        println!("2 clicked");
-                        ui.close();
-                    }
+                ui.menu_button("Displays", |ui| {
+                    ui.checkbox(&mut self.config.display_hrm, "Display HR");
+                    ui.checkbox(&mut self.config.display_time, "Display Timestamp");
                 })
             });
 
@@ -191,24 +191,6 @@ impl eframe::App for MyApp {
                 self.current_time = msg[0];
             }
 
-            ui.scope(|ui| {
-                ui.horizontal(|ui| {
-                    ui.style_mut().spacing.item_spacing.x = 0.0; 
-                    ui.label(
-                        egui::RichText::new(format!("{}bpm", self.current_heartrate))
-                            .size(24.0)
-                            .strong()
-                            .color(egui::Color32::RED)
-                    );
-                    ui.label(
-                        egui::RichText::new(format!("{}s", self.current_time.round() as i32))
-                            .size(24.0)
-                            .strong()
-                            .color(egui::Color32::BLACK)
-                    );
-                });
-            });
-
             let plot_points = PlotPoints::from_iter(self.heartrate_values.iter().copied());
             let line = Line::new("HR", plot_points).width(3.0).color(egui::Color32::BLUE);
             let plot = Plot::new("lines_demo")
@@ -219,15 +201,47 @@ impl eframe::App for MyApp {
             let mut xmax = self.config.max_x_bound;
             let ymin = self.config.min_y_bound;
             let ymax = self.config.max_y_bound;
-            
-            plot.show(ui, |plot_ui| {
-                plot_ui.line(line);
-                if self.config.rolling_x {
-                    xmin = (self.current_time - self.config.rolling_x_window).max(0.0);
-                    xmax = self.current_time;
-                }
-                plot_ui.set_plot_bounds(PlotBounds::from_min_max([xmin, ymin],[xmax, ymax]));
 
+            ui.horizontal_centered(|ui| {
+                let available_size = ui.available_size();
+                if self.config.display_hrm || self.config.display_time {
+                    ui.allocate_ui(egui::vec2(300.0, available_size.y), |ui| {
+                        ui.vertical_centered(|ui| {
+                            let hrm_height = 60.0;
+                            let avail = ui.available_size();
+                            ui.add_space((avail.y / 2.0) - (hrm_height/2.0));
+                            if self.config.display_hrm {
+                                ui.label(
+                                    egui::RichText::new(format!("{}bpm", self.current_heartrate))
+                                        .size(hrm_height)
+                                        .strong()
+                                        .color(egui::Color32::RED)
+                                );
+                            }
+                            if self.config.display_time {
+                                ui.label(
+                                    egui::RichText::new(format!("{}s", self.current_time.round() as i32))
+                                        .size(hrm_height/2.0)
+                                        .strong()
+                                        .color(egui::Color32::WHITE)
+                                );
+                            }
+                        });
+                    });
+
+                }
+
+                ui.allocate_ui(egui::vec2(ui.available_width(), available_size.y), |ui| {
+                    plot.show(ui, |plot_ui| {
+                        plot_ui.line(line);
+                        if self.config.rolling_x {
+                            xmin = (self.current_time - self.config.rolling_x_window).max(0.0);
+                            xmax = self.current_time;
+                        }
+                        plot_ui.set_plot_bounds(PlotBounds::from_min_max([xmin, ymin],[xmax, ymax]));
+
+                    });
+                });
             });
 
         });

@@ -192,7 +192,7 @@ impl AntHandler {
                 println!("re-open ANT channel");
                 self.hr.open();
             }
-            std::thread::sleep(Duration::from_millis(10));
+            std::thread::sleep(Duration::from_millis(50));
 
         }
         println!("ANT thread termination received");
