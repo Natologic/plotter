@@ -1,8 +1,9 @@
 mod fit_handler;
 mod ant_handler;
+mod config;
 
-use ant::messages::config;
 use ant_handler::AntHandler;
+use config::Config;
 
 use std::io::Error;
 use std::sync::Arc;
@@ -16,41 +17,6 @@ use egui_plot::{Plot, PlotPoints, PlotBounds, Line};
 
 use windows_sys::Win32::System::Console::{GetStdHandle, GetConsoleMode, SetConsoleMode, CONSOLE_MODE, ENABLE_QUICK_EDIT_MODE, STD_INPUT_HANDLE};
 
-use serde::{Serialize, Deserialize};
-use serde_json;
-
-#[derive(Serialize, Deserialize, Debug)]
-struct Config {
-    period_ms: u32,
-    rolling_x: bool,
-    rolling_x_window: f64,
-    min_x_bound: f64,
-    min_y_bound: f64,
-    max_x_bound: f64,
-    max_y_bound: f64,
-    window_width: f32,
-    window_height: f32,
-    display_hrm: bool,
-    display_time: bool,
-}
-
-impl Default for Config{
-    fn default() -> Self {
-        Self {
-            period_ms: 300,
-            rolling_x: true,
-            rolling_x_window: 60.0,
-            min_x_bound: 0.0,
-            min_y_bound: 0.0,
-            max_x_bound: 10.0,
-            max_y_bound: 200.0,
-            window_width: 400.0,
-            window_height: 300.0,
-            display_hrm: true,
-            display_time: true,
-        }
-    }
-}
 
 struct MyApp {
     period_ms: Arc<AtomicU32>,
@@ -77,22 +43,13 @@ impl MyApp {
         }
     }
 
-    fn save_config(&self) {
-        match serde_json::to_string_pretty(&self.config) {
-            Ok(json) => {
-                match std::fs::write(&self.config_path, json) {
-                    Ok(_) => println!("Successfully saved config to: {:?}", self.config_path),
-                    Err(e) => eprintln!("FAILED to write config file: {:?}", e),
-                }
-            }
-            Err(e) => eprintln!("FAILED to serialize config: {:?}", e),
-        }
-    }
 }
 
 impl eframe::App for MyApp {
     fn on_exit(&mut self) {
-        self.save_config();
+        if let Err(e) = self.config.save_config(&self.config_path) {
+            eprintln!("Could not save config file: {e}")
+        };
         // if the window is closed out then set the term to true
         self.thread_gui_term.store(true, Ordering::Relaxed);
     }
@@ -171,6 +128,7 @@ impl eframe::App for MyApp {
                 ui.menu_button("Displays", |ui| {
                     ui.checkbox(&mut self.config.display_hrm, "Display HR");
                     ui.checkbox(&mut self.config.display_time, "Display Timestamp");
+                    ui.checkbox(&mut self.config.display_plot, "Display Plot");
                 })
             });
 
@@ -204,6 +162,7 @@ impl eframe::App for MyApp {
 
             ui.horizontal_centered(|ui| {
                 let available_size = ui.available_size();
+                // Numeric readouts for HRM and time duration
                 if self.config.display_hrm || self.config.display_time {
                     ui.allocate_ui(egui::vec2(300.0, available_size.y), |ui| {
                         ui.vertical_centered(|ui| {
@@ -230,20 +189,21 @@ impl eframe::App for MyApp {
                     });
 
                 }
+                // Plot
+                if self.config.display_plot {
+                    ui.allocate_ui(egui::vec2(ui.available_width(), available_size.y), |ui| {
+                        plot.show(ui, |plot_ui| {
+                            plot_ui.line(line);
+                            if self.config.rolling_x {
+                                xmin = (self.current_time - self.config.rolling_x_window).max(0.0);
+                                xmax = self.current_time;
+                            }
+                            plot_ui.set_plot_bounds(PlotBounds::from_min_max([xmin, ymin],[xmax, ymax]));
 
-                ui.allocate_ui(egui::vec2(ui.available_width(), available_size.y), |ui| {
-                    plot.show(ui, |plot_ui| {
-                        plot_ui.line(line);
-                        if self.config.rolling_x {
-                            xmin = (self.current_time - self.config.rolling_x_window).max(0.0);
-                            xmax = self.current_time;
-                        }
-                        plot_ui.set_plot_bounds(PlotBounds::from_min_max([xmin, ymin],[xmax, ymax]));
-
+                        });
                     });
-                });
+                }
             });
-
         });
     }
 
@@ -269,17 +229,8 @@ fn main() -> Result<(), Error> {
     #[cfg(windows)]
     windows_disable_quickedit();
 
-    // config file
-    let mut config_path = std::env::current_exe()?;
-    config_path.pop();
-    config_path.push("config.json");
-    // create one if it doesn't exist
-    if !config_path.exists() {
-        let config_default = Config::default();
-        std::fs::write(&config_path, serde_json::to_string_pretty(&config_default).unwrap())?;
-        println!("Default JSON config created at: {:?}", config_path);
-    }
-    let config: Config = serde_json::from_str(&std::fs::read_to_string(&config_path)?).unwrap();
+    let config_path = Config::default_path()?;
+    let config = Config::load_config(&config_path)?;
 
     // thread terminators
     let thread_main_term = Arc::new(AtomicBool::new(false));
