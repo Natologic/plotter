@@ -2,7 +2,7 @@ use crate::fit_handler::FitHandler;
 use crate::fit_handler::current_fit_time_fine;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -12,6 +12,7 @@ use ant::drivers::{is_ant_usb_device_from_device, UsbDriver};
 use ant::messages::config::{SetNetworkKey,SearchTimeout};
 use ant::plus::profiles::heart_rate::{Display, DisplayConfig, Period, CommonData, MonitorTxDataPage};
 use ant::router::Router;
+use ant::router::RouterError;
 use rusb::GlobalContext;
 use rusb::{Device, DeviceList};
 use thingbuf::mpsc::errors::{TryRecvError, TrySendError};
@@ -72,40 +73,65 @@ impl<T: Default + Clone> RxHandler<T> for RxReceiver<T> {
     }
 }
 
+pub enum AntStatus {
+    NoDevice = 0,
+    SetupFailure = 1,
+    Connected = 2,
+    Disconnected = 3,
+}
+// outcome of the run method
+pub enum Outcome {
+    Terminated,
+    Failed,
+}
 
 pub struct AntHandler {
-    fit_handler: FitHandler,
     router: Router<rusb::Error, UsbDriver<GlobalContext>, TxSender<AntMessage>, RxReceiver<TxMessage>>,
     hr: Display<TxSender<TxMessage>, RxReceiver<AntMessage>>,
     period_ms: Arc<AtomicU32>,
 }
 
 impl AntHandler {
-    pub fn new(period_ms: Arc<AtomicU32>) -> Result<Self, String> {
-        let fit_handler = FitHandler::create_file().expect("Unable to create FIT file");
+    pub fn new(period_ms: Arc<AtomicU32>, status: Arc<AtomicU8>) -> Result<Self, String> {
+        // definition for setup failures
+        let setup_failure = |err: String| -> String {
+            status.store(AntStatus::SetupFailure as u8, Ordering::Relaxed);
+            err
+        };
 
-        // ant
+        // TODO move this later...
+        
+
         // Try to find USB ANT sticks
-        let mut devices: Vec<Device<_>> = DeviceList::new().expect("Unable to lookup usb devices").iter().filter(|x| is_ant_usb_device_from_device(x)).collect();
+        let mut devices: Vec<Device<_>> = DeviceList::new()
+            .map_err(|err| setup_failure(format!("USB enumeration: {err}")))?
+            .iter()
+            .filter(|x| is_ant_usb_device_from_device(x))
+            .collect();
         if devices.is_empty() {
-            panic!("No USB ANT adapters found");
+            status.store(AntStatus::NoDevice as u8, Ordering::Relaxed);
+            return Err("No ANT USB sticks found".into());
+            //panic!("No USB ANT adapters found");
         }
-        // Just pick the first device we find in the list
+        // Just pick the first device we find in the list and set up the driver
         let device = devices.remove(0);
-        let driver = UsbDriver::new(device).unwrap();
+        let driver = UsbDriver::new(device).map_err(|err| setup_failure(format!("driver: {err:?}")))?;
+        
+        // set up the channels and the router
         let (channel_tx, router_rx) = channel_thingbuf(64);
         let (router_tx, channel_rx) = channel_thingbuf(64);
-        let mut router = Router::new( driver, RxReceiver { receiver: router_rx}).unwrap();
+        let mut router = Router::new( driver, RxReceiver { receiver: router_rx }).map_err(|err| setup_failure(format!("router: {err:?}")))?;
         
-        let snk = SetNetworkKey::new(0, [0xB9, 0xA5, 0x21, 0xFB, 0xBD, 0x72, 0xC3, 0x45]); // Get this from thisisant.com
-        router.send(&snk).expect("failed to set network key");
-        let chan = router.add_channel(TxSender { sender: router_tx }).expect("Failed to add ANT channel");
+        // use the network key to set up the channel and set the timeout
+        let snk = SetNetworkKey::new(0, [0xB9, 0xA5, 0x21, 0xFB, 0xBD, 0x72, 0xC3, 0x45]); 
+        router.send(&snk).map_err(|err| setup_failure(format!("network key: {err:?}")))?;
+        let chan = router.add_channel(TxSender { sender: router_tx }).map_err(|err| setup_failure(format!("ant channel: {err:?}")))?;
         let search_timeout = SearchTimeout::new(chan, 255);
-        router.send(&search_timeout).expect("failed to set search timeout");
+        router.send(&search_timeout).map_err(|err| setup_failure(format!("timeout: {err:?}")))?;
         let config = DisplayConfig { device_number: 0, device_number_extension: 0.into(), channel: chan, period: Period::FourHz, ant_plus_key_index: 0};
 
+        // this is where the heatrate is stored
         let mut hr = Display::new( config, TxSender { sender: channel_tx }, RxReceiver { receiver: channel_rx});
-
 
         // save the computed heartrate if we get it 
         hr.set_rx_datapage_callback(Some(|msg| {
@@ -154,26 +180,31 @@ impl AntHandler {
             // println!("{:#?}", msg);
         }));
 
+        // open and report connected
         hr.open();
-
-        Ok(Self{fit_handler, router, hr, period_ms})
+        status.store(AntStatus::Connected as u8, Ordering::Relaxed);
+        Ok(Self{router, hr, period_ms})
     }
 
-    pub fn run(mut self, thread_ant_term:Arc<AtomicBool>, egui_ctx_rx: Receiver<egui::Context>, heartrate_value_tx: Sender<[f64; 2]>) {
-        // get the egui context so we can request to repaint it later
-        let ctx = egui_ctx_rx.recv().unwrap();
-
-        let start_fit_time = current_fit_time_fine();
+    pub fn run(mut self, thread_ant_term:Arc<AtomicBool>, ctx: egui::Context, heartrate_value_tx: Sender<[f64; 2]>, status: Arc<AtomicU8>, fit_handler: &mut FitHandler, start_fit_time:  f64) -> Outcome {
         let mut last_sent = Instant::now();
-
 
         // run this thread in a loop until we get the terminator
         while !thread_ant_term.load(Ordering::Relaxed) {
-            // self.router.process().ok();
-            // self.hr.process().ok();
-            if let Err(e) = self.router.process() {
-                println!("Router process error: {:?}", e);
+
+            match self.router.process() {
+                Err(RouterError::DriverError()) => {
+                    status.store(AntStatus::Disconnected as u8, Ordering::Relaxed);
+                    ctx.request_repaint();
+                    eprintln!("ANT USB stick disconnected");
+                    return Outcome::Failed
+                }
+                Err(e) => {
+                    println!("Router process error: {:?}", e);
+                }
+                Ok(_) => {}
             }
+
             if let Err(e) = self.hr.process() {
                 println!("HR process error: {:?}", e);
             }
@@ -184,7 +215,7 @@ impl AntHandler {
                 let heart_rate = CURRENT_HEARTRATE.load(Ordering::Relaxed) as f64;
                 heartrate_value_tx.send([fit_offset, heart_rate]).map_err(|err| println!("{:?}", err)).ok();
                 ctx.request_repaint();
-                let _ = self.fit_handler.update_file(timestamp, heart_rate as u8);
+                let _ = fit_handler.update_file(timestamp, heart_rate as u8);
                 last_sent = Instant::now();
             }
 
@@ -196,8 +227,8 @@ impl AntHandler {
 
         }
         println!("ANT thread termination received");
-        self.fit_handler.finish_file().expect("Unable to finish FIT file");
         ctx.request_repaint();
+        Outcome::Terminated
     }
 
 }

@@ -2,13 +2,17 @@ mod fit_handler;
 mod ant_handler;
 mod config;
 
-use ant_handler::AntHandler;
+
+use ant_handler::{AntHandler, AntStatus, Outcome};
+use fit_handler::FitHandler;
+use crate::fit_handler::current_fit_time_fine;
 use config::Config;
 
 use std::io::Error;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use std::sync::mpsc::{channel, Sender, Receiver, RecvTimeoutError};
+use std::time::Duration;
 use std::thread;
 
 
@@ -27,10 +31,12 @@ struct MyApp {
     heartrate_values: Vec<[f64; 2]>,
     config: Config,
     config_path: std::path::PathBuf,
+    ant_status: Arc<AtomicU8>,
+    ant_retry_tx: Sender<()>,
 }
 
 impl MyApp {
-    fn new(period_ms: Arc<AtomicU32>, heartrate_value_rx: Receiver<[f64; 2]>, thread_gui_term: Arc<AtomicBool>, config: Config, config_path: std::path::PathBuf) -> Self {
+    fn new(period_ms: Arc<AtomicU32>, heartrate_value_rx: Receiver<[f64; 2]>, thread_gui_term: Arc<AtomicBool>, config: Config, config_path: std::path::PathBuf, ant_status: Arc<AtomicU8>, ant_retry_tx: Sender<()>) -> Self {
         Self {
             period_ms,
             current_heartrate: 0,
@@ -40,6 +46,8 @@ impl MyApp {
             heartrate_values: Vec::new(),
             config,
             config_path,
+            ant_status,
+            ant_retry_tx,
         }
     }
 
@@ -52,6 +60,7 @@ impl eframe::App for MyApp {
         };
         // if the window is closed out then set the term to true
         self.thread_gui_term.store(true, Ordering::Relaxed);
+        let _ = self.ant_retry_tx.send(());
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -129,6 +138,11 @@ impl eframe::App for MyApp {
                     ui.checkbox(&mut self.config.display_hrm, "Display HR");
                     ui.checkbox(&mut self.config.display_time, "Display Timestamp");
                     ui.checkbox(&mut self.config.display_plot, "Display Plot");
+                });
+                ui.menu_button("ANT", |ui| {
+                    if ui.button("Reconnect to ANT stick").clicked() {
+                        let _ = self.ant_retry_tx.send(());
+                    }
                 })
             });
 
@@ -229,6 +243,7 @@ fn main() -> Result<(), Error> {
     #[cfg(windows)]
     windows_disable_quickedit();
 
+    // load the configuration
     let config_path = Config::default_path()?;
     let config = Config::load_config(&config_path)?;
 
@@ -242,14 +257,63 @@ fn main() -> Result<(), Error> {
     // polling period atomic
     let thread_period_ms = Arc::new(AtomicU32::new(config.period_ms));
     let clone_period_ms = Arc::clone(&thread_period_ms);
+    // ant status atomic
+    let ant_status = Arc::new(AtomicU8::new(AntStatus::NoDevice as u8));
+    let clone_ant_status = Arc::clone(&ant_status);
+    // ant retry 
+    let (ant_retry_tx, ant_retry_rx) = channel::<()>();
 
     let (egui_ctx_tx, egui_ctx_rx) = channel::<egui::Context>();
     let (heartrate_value_tx, heartrate_value_rx) = channel::<[f64; 2]>();
 
     let handle = thread::spawn(move || {
-        let _handle = AntHandler::new(thread_period_ms)
-            .expect("Cannot start ANT handler")
-            .run(thread_ant_term, egui_ctx_rx, heartrate_value_tx);
+        // get the egui context so the thread can request repaint later
+        let ctx = egui_ctx_rx.recv().unwrap();
+
+        // create fit file
+        let start_fit_time = current_fit_time_fine();
+        let mut fit_handler = FitHandler::create_file().expect("Unable to create FIT file");
+
+        let mut retry_connection = true;
+        loop {
+            if retry_connection {
+                retry_connection = false;
+                // try to start an ant thread
+                match AntHandler::new(Arc::clone(&thread_period_ms), Arc::clone(&clone_ant_status)) {
+                    Err(e) => eprintln!("Could not start ANT thread: {e}"),
+                    Ok(x) => {
+                        // run the thread, if it terminates then break, if it fails loop back around
+                        match x.run(Arc::clone(&thread_ant_term), ctx.clone(), heartrate_value_tx.clone(), Arc::clone(&clone_ant_status), &mut fit_handler, start_fit_time) {
+                            Outcome::Terminated => break,
+                            Outcome::Failed => {}
+                        }
+                    } 
+                }
+            }
+            // block until the retry button is pressed or we time out
+            match ant_retry_rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(()) => {
+                    // check first if the term was sent, if so, quit out of loop
+                    if thread_ant_term.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    // otherwise good to re-loop and try to restart the thread again
+                    retry_connection = true;
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    // if the timeout happened and the term is sent, quit out of the loop
+                    if thread_ant_term.load(Ordering::Relaxed) {
+                        break;
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    break;
+                }
+            }
+        }
+
+        // finish fit file
+        fit_handler.finish_file().expect("Unable to finish FIT file");
     });
 
     // Finally run egui in the main thread
@@ -262,7 +326,7 @@ fn main() -> Result<(), Error> {
         options,
         Box::new(|cc| {
             let _ = egui_ctx_tx.send(cc.egui_ctx.clone());
-            Ok(Box::<MyApp>::new(MyApp::new(clone_period_ms, heartrate_value_rx, thread_gui_term, config, config_path.clone())))
+            Ok(Box::<MyApp>::new(MyApp::new(clone_period_ms, heartrate_value_rx, thread_gui_term, config, config_path.clone(), ant_status, ant_retry_tx)))
         }),
     ).map_err(|err| println!("{:?}", err)).ok();
     println!("Closed egui");
