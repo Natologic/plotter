@@ -99,12 +99,9 @@ impl AntHandler {
             err
         };
 
-        // TODO move this later...
-        
-
         // Try to find USB ANT sticks
         let mut devices: Vec<Device<_>> = DeviceList::new()
-            .map_err(|err| setup_failure(format!("USB enumeration: {err}")))?
+            .map_err(|err| setup_failure(format!("USB enumeration: {err:?}")))?
             .iter()
             .filter(|x| is_ant_usb_device_from_device(x))
             .collect();
@@ -115,6 +112,8 @@ impl AntHandler {
         }
         // Just pick the first device we find in the list and set up the driver
         let device = devices.remove(0);
+        let usb_descriptor = device.device_descriptor().map_err(|err| setup_failure(format!("descriptor: {err:?}")))?;
+        println!("Found ANT USB stick with VID {:04x}, PID {:04x} at bus: {}, address: {}", usb_descriptor.vendor_id(), usb_descriptor.product_id(), device.bus_number(), device.address());
         let driver = UsbDriver::new(device).map_err(|err| setup_failure(format!("driver: {err:?}")))?;
         
         // set up the channels and the router

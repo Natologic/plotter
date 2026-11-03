@@ -2,10 +2,9 @@ mod fit_handler;
 mod ant_handler;
 mod config;
 
-
 use ant_handler::{AntHandler, AntStatus, Outcome};
 use fit_handler::FitHandler;
-use crate::fit_handler::current_fit_time_fine;
+use fit_handler::current_fit_time_fine;
 use config::Config;
 
 use std::io::Error;
@@ -14,7 +13,6 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::mpsc::{channel, Sender, Receiver, RecvTimeoutError};
 use std::time::Duration;
 use std::thread;
-
 
 use eframe::egui;
 use egui_plot::{Plot, PlotPoints, PlotBounds, Line};
